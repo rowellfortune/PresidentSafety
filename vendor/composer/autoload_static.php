@@ -46,6 +46,7 @@ class ComposerStaticInit62e10e6c8df9afc192311b196c75bb33
         ),
         'C' => 
         array (
+            'Composer\\Pcre\\' => 14,
             'Complex\\' => 8,
         ),
         'A' => 
@@ -103,6 +104,10 @@ class ComposerStaticInit62e10e6c8df9afc192311b196c75bb33
         'Dotenv\\' => 
         array (
             0 => __DIR__ . '/..' . '/vlucas/phpdotenv/src',
+        ),
+        'Composer\\Pcre\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/composer/pcre/src',
         ),
         'Complex\\' => 
         array (

@@ -12,99 +12,80 @@ use App\ProgressBar;
 use App\Logger;
 use Dotenv\Dotenv;
 
-// Laad omgevingsvariabelen uit het .env-bestand
+// Load .env config
 $dotenv = Dotenv::createImmutable(__DIR__);
 $dotenv->load();
 
-// Ophalen van omgevingsvariabelen
+// ENV
 $bearerToken = $_ENV['BEARER_TOKEN'];
 $sleepTime   = isset($_ENV['SLEEP_TIME']) ? (int) $_ENV['SLEEP_TIME'] : 0;
 $testMode    = isset($_ENV['TEST_MODE']) && filter_var($_ENV['TEST_MODE'], FILTER_VALIDATE_BOOLEAN);
 
 if ($sleepTime) echo "Wachten voor {$sleepTime} seconden tussen verzoeken...\n";
 
-// Initialiseer de logger
+// Logger
 $logger = new Logger();
 
-// Initialiseer de API-client met de logger
+// President API client
 $apiBaseUrl = 'https://data.presidentsafety.nl/api';
 $apiClient  = new ApiClient($apiBaseUrl, $bearerToken, $logger);
 
-try {
-    // Controleer of de 'data' map bestaat, zo niet, maak deze aan
-    $dataDirectory = __DIR__ . '/data';
-    if (!is_dir($dataDirectory)) {
-        mkdir($dataDirectory, 0755, true);
-    }
+// KatanaPIM API call
+function fetchKatanaProducts(): array
+{
+    $baseUrl = "https://schoononline.katanapim.com/api/v1/Product";
+    $apiKey = "549703c3-d73a-4c0b-8e15-0a25569bece2";
+    $pageSize = 100;
+    $page = 1;
+    $externalKeyToKorting = [];
 
-    // Stel het pad in voor het tijdelijke en het definitieve CSV bestand
-    $finalCsvFilePath = $dataDirectory . '/combined.csv';
-    $tempCsvFilePath = $dataDirectory . '/temp.csv';
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'apikey: ' . $apiKey,
+        'Accept: application/json'
+    ]);
 
-    // Open de CSV-writer met het tijdelijke bestand
-    $csvWriter = new CsvWriter($tempCsvFilePath, $finalCsvFilePath);
+    do {
+        $url = $baseUrl . "?filterModel.paging.pageSize=$pageSize&filterModel.paging.pageNumber=$page&filterModel.SpecFilters[0].SpecName=Korting%20op%20Inkoop";
+        curl_setopt($ch, CURLOPT_URL, $url);
 
-    // Ophalen van merken
-    $packageData = $apiClient->getPackage();
-    $brands      = $packageData[0]['brands'];
+        $response = curl_exec($ch);
+        if ($response === false) {
+            throw new Exception("Katana API error: " . curl_error($ch));
+        }
 
-    // Testmodus: gebruik slechts 2 merken
-    if ($testMode) {
-        $brands = array_slice($brands, 0, 2);
-        echo "Testmodus ingeschakeld: verwerken van de eerste 2 merken.\n";
-    }
+        $data = json_decode($response, true);
+        if (!isset($data['data']) || !is_array($data['data'])) {
+            throw new Exception("Unexpected Katana API response: $response");
+        }
 
-    $totalBrands = count($brands);
-    $progressBar = new ProgressBar($totalBrands);
+        foreach ($data['data'] as $product) {
+            $sku = $product['ExternalKey'] ?? null;
+            if (!$sku || empty($product['Specs'])) continue;
 
-    foreach ($brands as $brand) {
-        // Ophalen van producten
-        $products = $apiClient->getProductsByBrand($brand);
-        checkRateLimit($apiClient);
-        sleep($sleepTime);
+            foreach ($product['Specs'] as $spec) {
+                if (
+                    $spec['Name'] === 'Korting op Inkoop' &&
+                    isset($spec['OptionCode'])
+                ) {
+                    $korting = floatval(str_replace(',', '.', $spec['OptionCode']));
+                    $externalKeyToKorting[$sku] = $korting;
+                    break;
+                }
+            }
+        }
 
-        // Ophalen van voorraad
-        $stocks = $apiClient->getStocksByBrand($brand);
-        checkRateLimit($apiClient);
-        sleep($sleepTime);
+        if (count($data['data']) < $pageSize) break;
+        $page++;
+        sleep(1);
+    } while (true);
 
-        // Ophalen van prijzen
-        $prices = $apiClient->getPricesByBrand($brand);
-        checkRateLimit($apiClient);
-        sleep($sleepTime);
-
-        // Data combineren
-        $dataProcessor = new DataProcessor();
-        $combinedData = $dataProcessor->combineData($products, $prices, $stocks, $brand);
-
-        // Schrijf de gecombineerde data naar het CSV-bestand
-        $csvWriter->writeRows($combinedData);
-
-        // Update de voortgangsbalk
-        $progressBar->advance();
-
-        // Wacht tussen merken
-        sleep($sleepTime);
-    }
-
-    // Sluit de CSV-writer (dit zal het tijdelijke bestand hernoemen naar het definitieve bestand)
-    $csvWriter->close();
-
-    echo "\nAlle data succesvol opgehaald en opgeslagen in '{$finalCsvFilePath}'.\n";
-
-    // Toon de gelogde berichten
-    echo "\nDetails van de uitgevoerde API-aanroepen:\n";
-    $logger->output();
-
-} catch (Exception $e) {
-    echo 'Er is een fout opgetreden: ' . $e->getMessage() . "\n";
-    // Optioneel: verwijder het tijdelijke bestand bij een fout
-    if (isset($csvWriter) && file_exists($tempCsvFilePath)) {
-        unlink($tempCsvFilePath);
-    }
+    curl_close($ch);
+    return $externalKeyToKorting;
 }
 
-// Functie om de rate limit te controleren en indien nodig te wachten
+// Rate limit checker
 function checkRateLimit(ApiClient $apiClient): void
 {
     $rateLimitHeaders = $apiClient->getRateLimitHeaders();
@@ -115,5 +96,84 @@ function checkRateLimit(ApiClient $apiClient): void
             echo "\nRate limit bereikt. Wachten voor {$waitTime} seconden tot reset...\n";
             sleep($waitTime);
         }
+    }
+}
+
+// Start main process
+try {
+    $dataDirectory = __DIR__ . '/data';
+    if (!is_dir($dataDirectory)) {
+        mkdir($dataDirectory, 0755, true);
+    }
+
+    $finalCsvFilePath = $dataDirectory . '/combined.csv';
+    $tempCsvFilePath = $dataDirectory . '/temp.csv';
+
+    $csvWriter = new CsvWriter($tempCsvFilePath, $finalCsvFilePath);
+
+    echo "Fetching KatanaPIM korting mappings...\n";
+    $katanaKortingMap = fetchKatanaProducts();
+
+    $packageData = $apiClient->getPackage();
+    $brands      = $packageData[0]['brands'];
+
+    if ($testMode) {
+        $brands = array_slice($brands, 0, 2);
+        echo "Testmodus ingeschakeld: verwerken van de eerste 2 merken.\n";
+    }
+
+    $totalBrands = count($brands);
+    $progressBar = new ProgressBar($totalBrands);
+
+    foreach ($brands as $brand) {
+        $products = $apiClient->getProductsByBrand($brand);
+        checkRateLimit($apiClient);
+        sleep($sleepTime);
+
+        $stocks = $apiClient->getStocksByBrand($brand);
+        checkRateLimit($apiClient);
+        sleep($sleepTime);
+
+        $prices = $apiClient->getPricesByBrand($brand);
+        checkRateLimit($apiClient);
+        sleep($sleepTime);
+
+        $dataProcessor = new DataProcessor();
+        $combinedData = $dataProcessor->combineData($products, $prices, $stocks, $brand);
+
+        // Verrijk combinedData met korting & inkoopprijs
+        foreach ($combinedData as &$row) {
+            $sku = $row['sku'];
+            $salesPrice = floatval($row['sales_price']);
+
+            if (isset($katanaKortingMap[$sku])) {
+                $korting = $katanaKortingMap[$sku];
+                $inkoopprijs = $salesPrice - ($salesPrice * $korting);
+
+                $row['korting_op_inkoop'] = $korting;
+                $row['inkoopprijs'] = number_format($inkoopprijs, 2, '.', '');
+                $logger->log("SKU $sku → korting: $korting → inkoopprijs: $inkoopprijs");
+            } else {
+                $row['korting_op_inkoop'] = '';
+                $row['inkoopprijs'] = '';
+            }
+        }
+        unset($row);
+
+        $csvWriter->writeRows($combinedData);
+        $progressBar->advance();
+        sleep($sleepTime);
+    }
+
+    $csvWriter->close();
+
+    echo "\n✅ Alles succesvol opgeslagen in '{$finalCsvFilePath}'.\n";
+    echo "\n🔍 Log overzicht:\n";
+    $logger->output();
+
+} catch (Exception $e) {
+    echo '❌ Fout opgetreden: ' . $e->getMessage() . "\n";
+    if (isset($csvWriter) && file_exists($tempCsvFilePath)) {
+        unlink($tempCsvFilePath);
     }
 }

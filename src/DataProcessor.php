@@ -53,6 +53,8 @@ class DataProcessor
                 'price'                  => $price,
                 'stock'                  => $stocks[$materialNumber] ?? '',
                 'web_text'               => $product['web_text'] ?? '',
+                'inkoopprijs'            => $inkoopprijs['inkoopprijs'],
+                'korting_op_inkoop'            => $inkoopprijs['korting_op_inkoop'],
             ];
         }
 
